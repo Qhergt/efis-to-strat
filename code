@@ -1,0 +1,91 @@
+#include <WiFiUdp.h>
+#include <WiFi.h>
+uint8_t  btString[32];
+char     dispString[64];
+#include "BluetoothSerial.h"
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+BluetoothSerial SerialBT;
+#include "VirtuinoCM.h"
+VirtuinoCM virtuino;
+#define V_memory_count 32          // the size of V memory. You can change it to a number <=255)
+float V[V_memory_count];           // This array is synchronized with Virtuino V memory. You can change the type to int, long etc.
+int      iCheck;
+boolean debug = true;
+ WiFiUDP udp;
+void setup() {
+  if (debug) {
+    Serial.begin(115200);
+    while (!Serial) continue;
+  }
+  SerialBT.begin("EFIS TO STRATUX"); //Bluetooth device name
+  SerialBT.setTimeout(50);
+  virtuino.begin(onReceived, onRequested, 256);
+ 
+}
+
+void loop() {
+  virtuinoRun();
+  // change the values
+  float airspeed = V[0];
+  float alt = V[1];
+  float head = V[2];
+  // Simple checksum
+  iCheck = static_cast<int>( (airspeed + alt + head + -1 + -1) / 4.0 );
+  // Send the data over UDP
+  sprintf( dispString, "%.2f,%.2f,%.2f,-1,-1,%d;", airspeed, alt, head, -1 , iCheck );
+  printf( "%s\n", dispString );
+  memcpy( btString, dispString, strlen( dispString ) );
+  udp.beginPacket( "192.168.10.255", 45678 );
+  udp.write( static_cast<uint8_t *>( btString ), strlen( dispString ) );
+  udp.endPacket();
+
+
+
+}
+//============================================================== onCommandReceived
+//==============================================================
+/* This function is called every time Virtuino app sends a request to server to change a Pin value
+   The 'variableType' can be a character like V, T, O  V=Virtual pin  T=Text Pin    O=PWM Pin
+   The 'variableIndex' is the pin number index of Virtuino app
+   The 'valueAsText' is the value that has sent from the app   */
+void onReceived(char variableType, uint8_t variableIndex, String valueAsText) {
+  if (variableType == 'V') {
+    float value = valueAsText.toFloat();        // convert the value to float. The valueAsText have to be numerical
+    if (variableIndex < V_memory_count) V[variableIndex] = value;          // copy the received value to arduino V memory array
+  }
+}
+
+//==============================================================
+/* This function is called every time Virtuino app requests to read a pin value*/
+String onRequested(char variableType, uint8_t variableIndex) {
+  if (variableType == 'V') {
+    if (variableIndex < V_memory_count) return  String(V[variableIndex]); // return the value of the arduino V memory array
+  }
+  return "";
+}
+
+//============================================================== virtuinoRun
+void virtuinoRun() {
+  while (SerialBT.available()) {
+    char tempChar = SerialBT.read();
+    if (tempChar == CM_START_CHAR) {             // a new command is starting...
+      virtuino.readBuffer = CM_START_CHAR;   // copy the new command to the virtuino readBuffer
+      virtuino.readBuffer += SerialBT.readStringUntil(CM_END_CHAR);
+      virtuino.readBuffer += CM_END_CHAR;
+      if (debug) Serial.println("\nCommand= " + virtuino.readBuffer);
+      String* response = virtuino.getResponse();   // get the text that has to be sent to Virtuino as reply. The library will check the inptuBuffer and it will create the response text
+      if (debug) Serial.println("Response : " + *response);
+      SerialBT.print(*response);
+      break;
+    }
+  }
+}
+
+
+//============================================================== vDelay
+void vDelay(int delayInMillis) {
+  long t = millis() + delayInMillis;
+  while (millis() < t) virtuinoRun();
+}
